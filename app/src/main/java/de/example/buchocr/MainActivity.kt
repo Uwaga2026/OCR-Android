@@ -16,6 +16,9 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
@@ -107,6 +110,19 @@ class MainActivity : AppCompatActivity() {
         ))
         outer.addView(save, match())
         setContentView(outer)
+        // Ab Android 15 (targetSdk 35) zeichnet sich die App hinter Statusleiste und
+        // Navigationsleiste. Ohne Abstand würde der Speichern-Button verdeckt, und die
+        // Bildschirmtastatur würde ihn bei der Textkorrektur überdecken.
+        WindowCompat.setDecorFitsSystemWindows(window, true)
+        ViewCompat.setOnApplyWindowInsetsListener(outer) { v, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            v.setPadding(
+                22 + bars.left, 24 + bars.top, 22 + bars.right,
+                16 + maxOf(bars.bottom, ime.bottom)
+            )
+            insets
+        }
     }
 
     private fun match() = LinearLayout.LayoutParams(
