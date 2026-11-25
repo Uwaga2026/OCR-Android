@@ -114,7 +114,7 @@ class CameraActivity : AppCompatActivity() {
             text = "Foto"
             textSize = 16f
             setTextColor(Color.BLACK)
-            background = circle(Color.WHITE)
+            background = circle(0xFF3DE070.toInt())
             setOnClickListener { takePhoto() }
         }
         val done = Button(this).apply {
@@ -201,7 +201,7 @@ class CameraActivity : AppCompatActivity() {
     private fun showBadge(style: Style, message: String) {
         badge.background = circle(
             when (style) {
-                Style.GOOD -> 0xFF2E7D32.toInt()
+                Style.GOOD -> 0xFF2BC05E.toInt()
                 Style.WARN -> 0xFFEF8F00.toInt()
                 Style.BAD -> 0xFFC62828.toInt()
             }

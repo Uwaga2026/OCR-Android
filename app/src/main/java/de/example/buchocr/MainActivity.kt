@@ -1,10 +1,14 @@
 package de.example.buchocr
 
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.view.textservice.SentenceSuggestionsInfo
 import android.view.textservice.SpellCheckerSession
@@ -13,14 +17,14 @@ import android.view.textservice.TextInfo
 import android.view.textservice.TextServicesManager
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import android.content.Context
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.appcompat.widget.Toolbar
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -30,16 +34,27 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+// Farben aus dem Design
+private val BG = 0xFF0B0F12.toInt()
+private val CARD = 0xFF161C22.toInt()
+private val CARD_BORDER = 0xFF262E37.toInt()
+private val GREEN = 0xFF3DE070.toInt()
+private val TEXT = 0xFFFFFFFF.toInt()
+private val MUTED = 0xFF8B95A1.toInt()
+private val DANGER = 0xFFFF6B6B.toInt()
+
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var toolbar: Toolbar
-    private lateinit var status: TextView
+    private lateinit var countView: TextView
+    private lateinit var statusHint: TextView
     private lateinit var editor: EditText
     private lateinit var runButton: Button
     private lateinit var chooseButton: Button
     private lateinit var cameraButton: Button
+    private lateinit var panels: List<View>
+    private lateinit var navTabs: List<TextView>
 
-    private val pending = mutableListOf<android.net.Uri>()
+    private val pending = mutableListOf<Uri>()
     private var busy = false
     private var spellSession: SpellCheckerSession? = null
 
@@ -68,6 +83,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         buildScreen()
+        showTab(0)
     }
 
     override fun onResume() {
@@ -82,108 +98,207 @@ class MainActivity : AppCompatActivity() {
         ScanStore.text = editor.text.toString()
     }
 
-    private fun buildScreen() {
-        toolbar = Toolbar(this).apply {
-            title = "OCR"
-            setTitleTextColor(0xFF17243A.toInt())
-            setBackgroundColor(0xFFF4F6FA.toInt())
-            inflateMenu(R.menu.main_menu)
-            setOnMenuItemClickListener { item ->
-                when (item.itemId) {
-                    R.id.menu_spell -> { spellCheck(); true }
-                    R.id.menu_clear -> { confirmClear(); true }
-                    else -> false
-                }
-            }
+    // --- Aufbau ----------------------------------------------------------------------
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun rounded(color: Int, radius: Float, strokeDp: Int = 0, strokeColor: Int = 0) =
+        GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = radius
+            if (strokeDp > 0) setStroke(dp(strokeDp), strokeColor)
         }
-        val outer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(22, 24, 22, 16)
-            setBackgroundColor(0xFFF4F6FA.toInt())
-        }
-        val intro = TextView(this).apply {
-            text = "Seiten fotografieren – der Text wird sofort erkannt. Oder JPG/PNG auswählen und als Datei speichern."
-            textSize = 15f
-            setTextColor(0xFF526078.toInt())
-            setPadding(0, 8, 0, 18)
-        }
-        cameraButton = Button(this).apply {
-            text = "Kamera öffnen"
-            setOnClickListener { startActivity(Intent(this@MainActivity, CameraActivity::class.java)) }
-        }
-        chooseButton = Button(this).apply {
-            text = "JPG-/PNG-Fotos auswählen"
-            setOnClickListener { picker.launch(arrayOf("image/jpeg", "image/png")) }
-        }
-        runButton = Button(this).apply {
-            text = "Ausgewählte Fotos erkennen"
-            isEnabled = false
-            setOnClickListener { processPending() }
-        }
-        status = TextView(this).apply {
-            textSize = 14f
-            setTextColor(0xFF315C9B.toInt())
-            setPadding(0, 10, 0, 10)
-        }
-        editor = EditText(this).apply {
-            hint = "Der erkannte Text erscheint hier …"
+
+    private fun label(text: String, size: Float, color: Int, bold: Boolean = false) = TextView(this).apply {
+        this.text = text
+        textSize = size
+        setTextColor(color)
+        if (bold) typeface = Typeface.DEFAULT_BOLD
+    }
+
+    private fun column() = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+
+    private fun card() = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = rounded(CARD, dp(20).toFloat(), 1, CARD_BORDER)
+        setPadding(dp(18), dp(16), dp(18), dp(16))
+    }
+
+    private fun lp(bottomDp: Int = 0) = LinearLayout.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+    ).apply { bottomMargin = dp(bottomDp) }
+
+    /** Pillenform wie im Design: gefüllt (Akzent) oder umrandet. */
+    private fun pill(text: String, filled: Boolean, color: Int = GREEN, onClick: () -> Unit): Button =
+        Button(this).apply {
+            this.text = text
+            isAllCaps = false
             textSize = 16f
-            gravity = Gravity.TOP
-            minLines = 12
-            setPadding(14, 14, 14, 14)
-            setBackgroundColor(0xFFFFFFFF.toInt())
+            typeface = Typeface.DEFAULT_BOLD
+            stateListAnimator = null
+            elevation = 0f
+            minHeight = dp(54)
+            setTextColor(if (filled) Color.BLACK else color)
+            background = if (filled) rounded(GREEN, dp(27).toFloat())
+            else rounded(Color.TRANSPARENT, dp(27).toFloat(), 1, color)
+            setOnClickListener { onClick() }
         }
-        val save = Button(this).apply {
-            text = "Text als TXT speichern"
-            setOnClickListener { saveText() }
+
+    private fun buildScreen() {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(BG)
         }
-        outer.addView(toolbar, LinearLayout.LayoutParams(
+        val content = FrameLayout(this)
+        panels = listOf(buildHome(), buildText(), buildSettings())
+        panels.forEach { content.addView(it, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        )) }
+        root.addView(content, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        root.addView(buildNav(), LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
         ))
-        outer.addView(intro)
-        outer.addView(cameraButton, match())
-        outer.addView(chooseButton, match())
-        outer.addView(runButton, match())
-        outer.addView(status)
-        outer.addView(editor, LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f
-        ))
-        outer.addView(save, match())
-        setContentView(outer)
+        setContentView(root)
 
         // Ab Android 15 (targetSdk 35) zeichnet sich die App hinter Status- und Navigationsleiste.
-        // Der Abstand unten berücksichtigt außerdem die Bildschirmtastatur.
+        // Unten Platz für Navigationsleiste oder Bildschirmtastatur lassen.
         WindowCompat.setDecorFitsSystemWindows(window, true)
-        ViewCompat.setOnApplyWindowInsetsListener(outer) { v, insets ->
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
-            v.setPadding(
-                22 + bars.left, 24 + bars.top, 22 + bars.right,
-                16 + maxOf(bars.bottom, ime.bottom)
-            )
+            v.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, ime.bottom))
             insets
         }
     }
 
-    private fun match() = LinearLayout.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-    ).apply { bottomMargin = 8 }
+    private fun buildHome(): View {
+        val col = column().apply { setPadding(dp(22), dp(20), dp(22), dp(16)) }
+        col.addView(label("OCR", 34f, GREEN, true))
+        col.addView(label(
+            SimpleDateFormat("EEEE, d. MMMM", Locale.GERMANY).format(Date()).uppercase(Locale.GERMANY),
+            13f, GREEN
+        ))
+        col.addView(label("Texte aus Fotos", 28f, TEXT, true).apply { setPadding(0, dp(4), 0, dp(18)) })
+
+        val statusCard = card()
+        statusCard.addView(label("ERKANNTE SEITEN", 12f, MUTED))
+        countView = label("0", 40f, TEXT, true)
+        statusCard.addView(countView)
+        statusHint = label("", 14f, MUTED).apply { setPadding(0, dp(6), 0, 0) }
+        statusCard.addView(statusHint)
+        col.addView(statusCard, lp(18))
+
+        cameraButton = pill("Kamera öffnen", true) { startActivity(Intent(this, CameraActivity::class.java)) }
+        chooseButton = pill("JPG-/PNG-Fotos auswählen", false) { picker.launch(arrayOf("image/jpeg", "image/png")) }
+        runButton = pill("Ausgewählte Fotos erkennen", false) { processPending() }
+        col.addView(cameraButton, lp(12))
+        col.addView(chooseButton, lp(12))
+        col.addView(runButton, lp(0))
+
+        return ScrollView(this).apply { addView(col) }
+    }
+
+    private fun buildText(): View {
+        val col = column().apply { setPadding(dp(22), dp(20), dp(22), dp(16)) }
+        col.addView(label("Erkannter Text", 26f, TEXT, true), lp(14))
+        editor = EditText(this).apply {
+            hint = "Der erkannte Text erscheint hier …"
+            textSize = 16f
+            setTextColor(TEXT)
+            setHintTextColor(MUTED)
+            gravity = Gravity.TOP
+            background = rounded(CARD, dp(20).toFloat(), 1, CARD_BORDER)
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+        }
+        col.addView(editor, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f).apply {
+            bottomMargin = dp(14)
+        })
+        col.addView(pill("Als TXT speichern", true) { saveText() }, lp(12))
+        col.addView(pill("Teilen", false) { shareText() }, lp(0))
+        return col
+    }
+
+    private fun buildSettings(): View {
+        val col = column().apply { setPadding(dp(22), dp(20), dp(22), dp(16)) }
+        col.addView(label("Einstellungen", 26f, TEXT, true), lp(16))
+
+        val spell = card()
+        spell.addView(label("Rechtschreibung", 18f, TEXT, true))
+        spell.addView(label(
+            "Prüft den Text mit der Rechtschreibprüfung deines Handys und zeigt Vorschläge.",
+            14f, MUTED
+        ).apply { setPadding(0, dp(6), 0, dp(12)) })
+        spell.addView(pill("Rechtschreibung prüfen", false) { spellCheck() }, lp(0))
+        col.addView(spell, lp(14))
+
+        val clear = card()
+        clear.addView(label("Text löschen", 18f, TEXT, true))
+        clear.addView(label(
+            "Entfernt den erkannten Text und die Seitenzählung. Deine Fotos bleiben erhalten.",
+            14f, MUTED
+        ).apply { setPadding(0, dp(6), 0, dp(12)) })
+        clear.addView(pill("Text löschen …", false, DANGER) { confirmClear() }, lp(0))
+        col.addView(clear, lp(14))
+
+        val privacy = card()
+        privacy.addView(label("Datenschutz", 18f, TEXT, true))
+        privacy.addView(label(
+            "Die Texterkennung läuft offline auf deinem Gerät. Die App lädt keine Fotos hoch.",
+            14f, MUTED
+        ).apply { setPadding(0, dp(6), 0, 0) })
+        col.addView(privacy)
+
+        return ScrollView(this).apply { addView(col) }
+    }
+
+    private fun buildNav(): View {
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(CARD)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            gravity = Gravity.CENTER
+        }
+        navTabs = listOf("Scannen", "Text", "Einstellungen").mapIndexed { i, name ->
+            TextView(this).apply {
+                text = name
+                textSize = 14f
+                gravity = Gravity.CENTER
+                setPadding(dp(10), dp(10), dp(10), dp(10))
+                setOnClickListener { showTab(i) }
+            }.also { bar.addView(it, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)) }
+        }
+        return bar
+    }
+
+    private fun showTab(index: Int) {
+        panels.forEachIndexed { i, v -> v.visibility = if (i == index) View.VISIBLE else View.GONE }
+        navTabs.forEachIndexed { i, t ->
+            val active = i == index
+            t.background = if (active) rounded(GREEN, dp(22).toFloat()) else null
+            t.setTextColor(if (active) Color.BLACK else MUTED)
+            t.typeface = if (active) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        }
+    }
+
+    private fun updateStatus() {
+        countView.text = ScanStore.pageCount.toString()
+        statusHint.text = when {
+            pending.isNotEmpty() -> "${pending.size} Foto(s) warten auf Erkennung."
+            ScanStore.pageCount == 0 -> "Noch keine Seiten erkannt."
+            else -> "Du kannst den Text korrigieren, die Rechtschreibung prüfen und speichern."
+        }
+        runButton.isEnabled = !busy && pending.isNotEmpty()
+        runButton.alpha = if (runButton.isEnabled) 1f else 0.4f
+    }
 
     private fun setBusy(value: Boolean) {
         busy = value
         cameraButton.isEnabled = !value
         chooseButton.isEnabled = !value
-        runButton.isEnabled = !value && pending.isNotEmpty()
+        updateStatus()
     }
 
-    private fun updateStatus() {
-        status.text = when {
-            pending.isNotEmpty() -> "${pending.size} Foto(s) warten auf Erkennung."
-            ScanStore.pageCount == 0 -> "Noch keine Seiten erkannt."
-            else -> "${ScanStore.pageCount} Seite(n) erkannt. Du kannst den Text korrigieren, die Rechtschreibung prüfen und speichern."
-        }
-        runButton.isEnabled = !busy && pending.isNotEmpty()
-    }
+    // --- Erkennung -----------------------------------------------------------------
 
     /** Ausgewählte JPG/PNG-Dateien nacheinander erkennen. */
     private fun processPending() {
@@ -197,25 +312,26 @@ class MainActivity : AppCompatActivity() {
             var skipped = 0
             try {
                 batch.forEachIndexed { index, uri ->
-                    status.text = "Foto ${index + 1} von ${batch.size} wird erkannt …"
+                    statusHint.text = "Foto ${index + 1} von ${batch.size} wird erkannt …"
                     when (ScanStore.process(this@MainActivity, uri)) {
                         ScanStore.Outcome.NEW_PAGE -> newPages++
                         else -> skipped++
                     }
                     editor.setText(ScanStore.text)
                 }
-                status.text = "$newPages Seite(n) neu erkannt" +
+                statusHint.text = "$newPages Seite(n) neu erkannt" +
                     (if (skipped > 0) ", $skipped doppelt übersprungen" else "") + "."
             } catch (e: Exception) {
-                status.text = "Fehler bei der Texterkennung: ${e.localizedMessage ?: "Unbekannter Fehler"}"
+                statusHint.text = "Fehler bei der Texterkennung: ${e.localizedMessage ?: "Unbekannter Fehler"}"
             } finally {
                 setBusy(false)
-                if (pending.isNotEmpty()) processPending() else updateStatus()
+                if (pending.isNotEmpty()) processPending()
+                else updateStatus()
             }
         }
     }
 
-    // --- Rechtschreibung ----------------------------------------------------------
+    // --- Rechtschreibung --------------------------------------------------------------
 
     private fun spellCheck() {
         val text = editor.text.toString()
@@ -295,7 +411,7 @@ class MainActivity : AppCompatActivity() {
         editor.setText(regex.replace(editor.text.toString(), Regex.escapeReplacement(replacement)))
     }
 
-    // --- Text löschen und speichern ------------------------------------------------
+    // --- Löschen, speichern, teilen -------------------------------------------------
 
     private fun confirmClear() {
         AlertDialog.Builder(this)
@@ -321,5 +437,18 @@ class MainActivity : AppCompatActivity() {
         }
         val stamp = SimpleDateFormat("yyyyMMdd_HHmm", Locale.GERMANY).format(Date())
         createDocument.launch("Buchtext_$stamp.txt")
+    }
+
+    private fun shareText() {
+        val text = editor.text.toString()
+        if (text.isBlank()) {
+            Toast.makeText(this, "Es gibt noch keinen Text zum Teilen.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val send = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        startActivity(Intent.createChooser(send, "Text teilen"))
     }
 }
