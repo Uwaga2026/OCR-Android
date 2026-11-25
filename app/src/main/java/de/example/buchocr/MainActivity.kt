@@ -1,14 +1,9 @@
 package de.example.buchocr
 
-import android.content.Context
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.Color
-import android.graphics.ImageDecoder
-import android.net.Uri
+import android.graphics.Typeface
 import android.os.Bundle
-import android.provider.MediaStore
 import android.view.Gravity
 import android.view.ViewGroup
 import android.view.textservice.SentenceSuggestionsInfo
@@ -21,38 +16,21 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import android.content.Context
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.widget.Toolbar
-import androidx.core.content.FileProvider
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
-import com.google.mlkit.vision.common.InputImage
-import com.google.mlkit.vision.text.TextRecognition
-import com.google.mlkit.vision.text.latin.TextRecognizerOptions
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
-import kotlinx.coroutines.withContext
-import java.io.File
-import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
-
-    companion object {
-        private const val FILE_PROVIDER = "de.example.buchocr.fileprovider"
-        // Höchstens so viele abweichende Bits (von 64) gelten bei dHash als gleiches Foto.
-        private const val NEAR_DUPLICATE_BITS = 6
-    }
-
-    /** Fingerabdruck eines bereits verarbeiteten Fotos. */
-    private class Photo(val sha: String?, val hash: Long?)
 
     private lateinit var toolbar: Toolbar
     private lateinit var status: TextView
@@ -61,13 +39,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var chooseButton: Button
     private lateinit var cameraButton: Button
 
-    private val pending = mutableListOf<Uri>()          // Fotos, die noch erkannt werden müssen
-    private val processed = mutableListOf<Photo>()      // bereits erkannte Fotos (für Duplikat-Prüfung)
-    private val seenTexts = mutableSetOf<String>()      // bereits übernommene Seitentexte
-    private var pageNo = 0
-    private var liveMode = false                        // Sofort erkennen beim Fotografieren
+    private val pending = mutableListOf<android.net.Uri>()
     private var busy = false
-    private var pendingCameraUri: Uri? = null
     private var spellSession: SpellCheckerSession? = null
 
     private val picker = registerForActivityResult(
@@ -78,19 +51,7 @@ class MainActivity : AppCompatActivity() {
             catch (_: Exception) { }
             pending.add(uri)
         }
-        onNewPhotos()
-    }
-
-    private val camera = registerForActivityResult(
-        ActivityResultContracts.TakePicture()
-    ) { saved ->
-        val uri = pendingCameraUri
-        if (saved && uri != null) {
-            pending.add(uri)
-            onNewPhotos()
-        } else {
-            updateStatus()
-        }
+        processPending()
     }
 
     private val createDocument = registerForActivityResult(
@@ -109,6 +70,18 @@ class MainActivity : AppCompatActivity() {
         buildScreen()
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Seiten aus der Kamera-Ansicht übernehmen, ohne eigene Änderungen am Text zu verlieren.
+        if (editor.text.toString() != ScanStore.text) editor.setText(ScanStore.text)
+        updateStatus()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        ScanStore.text = editor.text.toString()
+    }
+
     private fun buildScreen() {
         toolbar = Toolbar(this).apply {
             title = "OCR"
@@ -117,16 +90,6 @@ class MainActivity : AppCompatActivity() {
             inflateMenu(R.menu.main_menu)
             setOnMenuItemClickListener { item ->
                 when (item.itemId) {
-                    R.id.menu_live -> {
-                        item.isChecked = !item.isChecked
-                        liveMode = item.isChecked
-                        Toast.makeText(
-                            this@MainActivity,
-                            if (liveMode) "Sofort-Erkennung an" else "Sofort-Erkennung aus",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                        true
-                    }
                     R.id.menu_spell -> { spellCheck(); true }
                     R.id.menu_clear -> { confirmClear(); true }
                     else -> false
@@ -139,26 +102,25 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(0xFFF4F6FA.toInt())
         }
         val intro = TextView(this).apply {
-            text = "Seiten fotografieren oder JPG/PNG auswählen, Text offline erkennen und als Datei speichern."
+            text = "Seiten fotografieren – der Text wird sofort erkannt. Oder JPG/PNG auswählen und als Datei speichern."
             textSize = 15f
             setTextColor(0xFF526078.toInt())
             setPadding(0, 8, 0, 18)
         }
         cameraButton = Button(this).apply {
-            text = "Seite mit Kamera fotografieren"
-            setOnClickListener { launchCamera() }
+            text = "Kamera öffnen"
+            setOnClickListener { startActivity(Intent(this@MainActivity, CameraActivity::class.java)) }
         }
         chooseButton = Button(this).apply {
             text = "JPG-/PNG-Fotos auswählen"
             setOnClickListener { picker.launch(arrayOf("image/jpeg", "image/png")) }
         }
         runButton = Button(this).apply {
-            text = "Texterkennung starten"
+            text = "Ausgewählte Fotos erkennen"
             isEnabled = false
             setOnClickListener { processPending() }
         }
         status = TextView(this).apply {
-            text = "Noch keine Fotos aufgenommen."
             textSize = 14f
             setTextColor(0xFF315C9B.toInt())
             setPadding(0, 10, 0, 10)
@@ -217,139 +179,41 @@ class MainActivity : AppCompatActivity() {
     private fun updateStatus() {
         status.text = when {
             pending.isNotEmpty() -> "${pending.size} Foto(s) warten auf Erkennung."
-            processed.isEmpty() -> "Noch keine Fotos aufgenommen."
-            else -> "${processed.size} Foto(s) erkannt. Du kannst weitere Seiten hinzufügen."
+            ScanStore.pageCount == 0 -> "Noch keine Seiten erkannt."
+            else -> "${ScanStore.pageCount} Seite(n) erkannt. Du kannst den Text korrigieren, die Rechtschreibung prüfen und speichern."
         }
         runButton.isEnabled = !busy && pending.isNotEmpty()
     }
 
-    private fun onNewPhotos() {
-        if (liveMode) processPending() else updateStatus()
-    }
-
-    private fun launchCamera() {
-        val dir = File(cacheDir, "scans").apply { mkdirs() }
-        val file = File(dir, "scan_${System.currentTimeMillis()}.jpg")
-        val uri = FileProvider.getUriForFile(this, FILE_PROVIDER, file)
-        pendingCameraUri = uri
-        try {
-            camera.launch(uri)
-        } catch (_: Exception) {
-            Toast.makeText(this, "Keine Kamera-App gefunden.", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    // --- Erkennung ---------------------------------------------------------------
-
+    /** Ausgewählte JPG/PNG-Dateien nacheinander erkennen. */
     private fun processPending() {
         if (busy || pending.isEmpty()) return
         val batch = pending.toList()
         pending.clear()
         setBusy(true)
+        ScanStore.text = editor.text.toString()
         lifecycleScope.launch {
-            val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
             var newPages = 0
-            var duplicatePhotos = 0
-            var skippedTexts = 0
+            var skipped = 0
             try {
                 batch.forEachIndexed { index, uri ->
-                    status.text = "Foto ${index + 1} von ${batch.size} wird geprüft …"
-                    val photo = withContext(Dispatchers.IO) { fingerprint(uri) }
-                    if (isDuplicate(photo)) { duplicatePhotos++; return@forEachIndexed }
-
-                    status.text = "Foto ${index + 1} von ${batch.size} wird gelesen …"
-                    val bitmap = withContext(Dispatchers.IO) { loadBitmap(uri) }
-                    val text = recognizer.process(InputImage.fromBitmap(bitmap, 0)).await().text.trim()
-                    bitmap.recycle()
-                    processed.add(photo)
-
-                    // Gleicher Text trotz anderem Foto (z. B. zweimal fotografierte Seite) nur einmal übernehmen.
-                    val key = normalize(text)
-                    if (key.isNotEmpty()) {
-                        if (key in seenTexts) { skippedTexts++; return@forEachIndexed }
-                        seenTexts.add(key)
+                    status.text = "Foto ${index + 1} von ${batch.size} wird erkannt …"
+                    when (ScanStore.process(this@MainActivity, uri)) {
+                        ScanStore.Outcome.NEW_PAGE -> newPages++
+                        else -> skipped++
                     }
-                    pageNo++
-                    newPages++
-                    appendPage(pageNo, text)
+                    editor.setText(ScanStore.text)
                 }
-                val parts = mutableListOf("$newPages Seite(n) neu erkannt.")
-                if (duplicatePhotos > 0) parts += "$duplicatePhotos doppeltes Foto(s) übersprungen."
-                if (skippedTexts > 0) parts += "$skippedTexts Seite(n) mit gleichem Text übersprungen."
-                parts += "Insgesamt ${processed.size} Foto(s). Du kannst den Text korrigieren, die Rechtschreibung prüfen und speichern."
-                status.text = parts.joinToString(" ")
+                status.text = "$newPages Seite(n) neu erkannt" +
+                    (if (skipped > 0) ", $skipped doppelt übersprungen" else "") + "."
             } catch (e: Exception) {
                 status.text = "Fehler bei der Texterkennung: ${e.localizedMessage ?: "Unbekannter Fehler"}"
             } finally {
-                recognizer.close()
                 setBusy(false)
-                if (pending.isNotEmpty()) processPending()
-                else updateStatus()
+                if (pending.isNotEmpty()) processPending() else updateStatus()
             }
         }
     }
-
-    private fun appendPage(n: Int, text: String) {
-        val current = editor.text.toString()
-        val block = "--- Seite $n ---\n\n$text"
-        editor.setText(if (current.isBlank()) block else current.trimEnd() + "\n\n" + block)
-    }
-
-    private fun loadBitmap(uri: Uri): Bitmap {
-        return if (android.os.Build.VERSION.SDK_INT >= 28) {
-            val source = ImageDecoder.createSource(contentResolver, uri)
-            ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
-                decoder.isMutableRequired = false
-            }
-        } else {
-            @Suppress("DEPRECATION")
-            MediaStore.Images.Media.getBitmap(contentResolver, uri)
-        }
-    }
-
-    // --- Doppelte Fotos erkennen ------------------------------------------------
-
-    /** SHA-256 des Dateiinhalts und Bild-Hash (dHash); fehlende Werte bleiben null. */
-    private fun fingerprint(uri: Uri): Photo {
-        return try {
-            val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() }
-                ?: return Photo(null, null)
-            val sha = MessageDigest.getInstance("SHA-256").digest(bytes)
-                .joinToString("") { "%02x".format(it) }
-
-            val opts = BitmapFactory.Options().apply { inSampleSize = 8 }
-            val small = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-                ?: return Photo(sha, null)
-            val g = Bitmap.createScaledBitmap(small, 9, 8, true)
-            small.recycle()
-
-            var hash = 0L
-            var bit = 0
-            for (y in 0 until 8) {
-                for (x in 0 until 8) {
-                    if (luma(g.getPixel(x, y)) > luma(g.getPixel(x + 1, y))) hash = hash or (1L shl bit)
-                    bit++
-                }
-            }
-            g.recycle()
-            Photo(sha, hash)
-        } catch (_: Exception) {
-            Photo(null, null)
-        }
-    }
-
-    private fun isDuplicate(photo: Photo): Boolean =
-        processed.any { old ->
-            (photo.sha != null && old.sha == photo.sha) ||
-                (photo.hash != null && old.hash != null &&
-                    java.lang.Long.bitCount(old.hash xor photo.hash) <= NEAR_DUPLICATE_BITS)
-        }
-
-    private fun luma(c: Int) =
-        (Color.red(c) * 299 + Color.green(c) * 587 + Color.blue(c) * 114) / 1000
-
-    /** Vergleichsform für Seitentexte: Groß-/Kleinschreibung und Leerzeichen egal. */
-    private fun normalize(s: String) = s.lowercase(Locale.GERMANY).replace(Regex("\\s+"), " ").trim()
 
     // --- Rechtschreibung ----------------------------------------------------------
 
@@ -436,18 +300,16 @@ class MainActivity : AppCompatActivity() {
     private fun confirmClear() {
         AlertDialog.Builder(this)
             .setTitle("Text löschen?")
-            .setMessage("Der erkannte Text und die Liste der erkannten Fotos werden entfernt. Die Fotos selbst bleiben unverändert.")
+            .setMessage("Der erkannte Text und die Seitenzählung werden entfernt. Deine Fotos auf dem Gerät bleiben erhalten.")
             .setPositiveButton("Löschen") { _, _ -> clearAll() }
             .setNegativeButton("Abbrechen", null)
             .show()
     }
 
     private fun clearAll() {
-        editor.setText("")
-        processed.clear()
-        seenTexts.clear()
-        pageNo = 0
+        ScanStore.reset()
         pending.clear()
+        editor.setText("")
         updateStatus()
         Toast.makeText(this, "Text gelöscht.", Toast.LENGTH_SHORT).show()
     }
